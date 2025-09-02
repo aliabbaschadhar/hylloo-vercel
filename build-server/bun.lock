@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "hylloo",
+      "name": "build-server",
       "devDependencies": {
         "@types/bun": "latest",
       },

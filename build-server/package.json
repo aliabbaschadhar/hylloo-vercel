@@ -1,5 +1,5 @@
 {
-  "name": "hylloo",
+  "name": "build-server",
   "module": "index.ts",
   "type": "module",
   "private": true,
