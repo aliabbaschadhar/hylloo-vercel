@@ -42,25 +42,31 @@ async function init() {
   process.on("close", async () => {
     console.log("Build complete")
     const distFolderPath = path.join(__dirname, "output", "dist")
-    // Finding the contents of dist folder
+    const distFolderContents = fs.readdirSync(distFolderPath, { recursive: true })
 
-    const distFolderContents = fs.readdirSync(distFolderPath, { recursive: true }) // So that it finds the files from folders insides folders
-
-    for (const filePath of distFolderContents) {
+    for (const file of distFolderContents) {
+      const filePath = path.join(distFolderPath, file as string)
       if (fs.lstatSync(filePath).isDirectory()) {
         continue;
       }
-      console.log("Uploading...", filePath)
+
+      const fileSize = fs.statSync(filePath).size
+      console.log(`Uploading ${filePath} (${fileSize} bytes)`)
+
+      // Use readFileSync for small files (< 10MB), createReadStream for larger files
+      const fileBody = fileSize < 10 * 1024 * 1024
+        ? fs.readFileSync(filePath)
+        : fs.createReadStream(filePath)
 
       const command = new PutObjectCommand({
         Bucket: bucket,
-        Key: `__outputs/${projectId}/${filePath}`,
-        Body: fs.createReadStream(filePath),
-        ContentType: mime.lookup(filePath as string) as string
+        Key: `__outputs/${projectId}/${file}`,
+        Body: fileBody,
+        ContentType: mime.lookup(filePath) || undefined
       })
 
       await s3Client.send(command)
-      console.log("File uploaded:", `__outputs/${projectId}/${filePath}`)
+      console.log("File uploaded:", `__outputs/${projectId}/${file}`)
     }
     console.log("Upload done")
   })
