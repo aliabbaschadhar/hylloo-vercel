@@ -3,12 +3,13 @@ import { exec } from "child_process"
 import fs from "fs"
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
 import * as mime from "mime-types"
+import { generateUniqueId } from "./utils"
 
 
 const accessKeyId = process.env.S3_ACCESS_KEY_ID;
 const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
 const endpoint = process.env.S3_ENDPOINT
-const projectId = process.env.PROJECT_ID
+const projectId = generateUniqueId()
 const bucket = process.env.BUCKET
 
 if (!accessKeyId || !secretAccessKey || !endpoint || !projectId || !bucket) {
