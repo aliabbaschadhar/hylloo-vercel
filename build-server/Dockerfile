@@ -8,7 +8,6 @@ RUN apt-get install -y git
 ENV PATH="/root/.bun/bin:${PATH}"
 
 WORKDIR /home/app
-COPY ./main.sh ./
 
 COPY package.json bun.lock ./
 
@@ -19,4 +18,4 @@ COPY . .
 RUN chmod +x main.sh
 RUN chmod +x index.ts
 
-ENTRYPOINT [ "/home/app/main.sh"]
+ENTRYPOINT [ "bun","index.ts"]

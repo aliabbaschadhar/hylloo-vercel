@@ -1,20 +1,21 @@
 import path from "path"
-import { exec } from "child_process"
+import { exec, execSync } from "child_process"
 import fs from "fs"
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
-import * as mime from "mime-types"
-import { generateUniqueId } from "./utils"
+import * as mime from "mime-types" // To check the type of file.
 
 
 const accessKeyId = process.env.S3_ACCESS_KEY_ID;
 const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
-const endpoint = process.env.S3_ENDPOINT
-const projectId = generateUniqueId()
-const bucket = process.env.BUCKET
+const endpoint = process.env.S3_ENDPOINT;
+const bucket = process.env.BUCKET;
+const gitUrl = process.env.GIT_REPOSITORY_URL;
+const projectId = process.env.PROJECT_SLUG
 
-if (!accessKeyId || !secretAccessKey || !endpoint || !projectId || !bucket) {
+if (!accessKeyId || !secretAccessKey || !endpoint || !projectId || !bucket || !gitUrl) {
   throw new Error("Missing AWS credentials in environment variables.");
 }
+console.log(`Access key ID: ${accessKeyId} \n Secret Access Key: ${secretAccessKey} \n Endpoint: ${endpoint} \n Bucket: ${bucket} \n Git URL: ${gitUrl} \n Project ID: ${projectId}`);
 
 const s3Client = new S3Client({
   region: "auto",
@@ -27,9 +28,13 @@ const s3Client = new S3Client({
 
 
 async function init() {
-  console.log("Executing index.js")
+  console.log("Executing build-server")
 
   const outDirPath = path.join(__dirname, "output")
+  execSync(`rm -rf ${outDirPath}`)
+  execSync(`git clone ${gitUrl} ${outDirPath}`)
+
+  // Install and build 
   const process = exec(`cd ${outDirPath} && bun install && bun run build`)
 
   process.stdout?.on("data", (data: Buffer) => {
