@@ -5,7 +5,9 @@ import * as k8s from "@kubernetes/client-node"
 import { Server } from "socket.io"
 import Redis from "ioredis"
 import http from 'http'
-
+import { PrismaClient } from "@prisma/client"
+import { z } from "zod"
+import { StatusCodes, ReasonPhrases } from "http-status-codes"
 
 
 const app = express();
@@ -19,6 +21,8 @@ const io = new Server(server, {
     origin: "*"
   }
 });
+const prisma = new PrismaClient();
+
 
 if (!redisUrl) throw new Error("Redis url is not available")
 
@@ -45,6 +49,7 @@ async function initRedisSubscribe() {
     io.to(channel).emit("message", message)
   })
 }
+
 initRedisSubscribe()
 
 app.get("/health", (req, res) => {
@@ -54,6 +59,40 @@ app.get("/health", (req, res) => {
 })
 
 app.post("/project", async (req, res) => {
+  const schema = z.object({
+    name: z.string(),
+    gitURL: z.url()
+  })
+
+  const safeParseResult = schema.safeParse(req.body)
+
+  if (safeParseResult.error) {
+    return res.status(400).json({
+      error: safeParseResult.error
+    })
+  }
+
+  const { name, gitURL } = safeParseResult.data
+
+  try {
+    const project = await prisma.project.create({
+      data: {
+        name: name,
+        gitURL: gitURL,
+        subDomain: generateSlug()
+      }
+    })
+
+    res.status(StatusCodes.CREATED).json({
+      msg: "Project created!",
+      data: { project }
+    })
+  } catch (error) {
+    console.error("Error while creating project", error)
+  }
+})
+
+app.post("/deploy", async (req, res) => {
   try {
     const { gitUrl } = req.body
 
