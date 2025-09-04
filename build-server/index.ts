@@ -27,12 +27,10 @@ publisher.on("error", (err) => {
 
 // console.log(`Access key ID: ${accessKeyId} \n Secret Access Key: ${secretAccessKey} \n Endpoint: ${endpoint} \n Bucket: ${bucket} \n Git URL: ${gitUrl} \n Project ID: ${projectId}, \n Redis Url: ${redisUrl}`);
 
-interface LogPayload {
-  log: string;
-}
 
-function publishLog(log: string): void {
-  publisher.publish(`logs:${projectId}`, JSON.stringify({ log } as LogPayload));
+
+function publishLog(log: string) {
+  publisher.publish(`logs:${projectId}`, JSON.stringify({ log }));
 }
 
 const s3Client = new S3Client({
