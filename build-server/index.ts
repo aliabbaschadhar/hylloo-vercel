@@ -1,3 +1,4 @@
+import "dotenv/config"
 import path from "path"
 import { exec, execSync } from "child_process"
 import fs from "fs"
@@ -12,15 +13,19 @@ const endpoint = process.env.S3_ENDPOINT;
 const bucket = process.env.BUCKET;
 const gitUrl = process.env.GIT_REPOSITORY_URL;
 const projectId = process.env.PROJECT_SLUG
-const publisher = new Redis("redis://localhost:2739")
+const redisUrl = process.env.REDIS_URL
 
 
-if (!accessKeyId || !secretAccessKey || !endpoint || !projectId || !bucket || !gitUrl) {
-  throw new Error("Missing AWS credentials in environment variables.");
+if (!accessKeyId || !secretAccessKey || !endpoint || !projectId || !bucket || !gitUrl || !redisUrl) {
+  throw new Error("Missing credentials in environment variables.");
 }
 
+const publisher = new Redis(redisUrl)
+publisher.on("error", (err) => {
+  console.error("Redis connection error:", err)
+})
 
-// console.log(`Access key ID: ${accessKeyId} \n Secret Access Key: ${secretAccessKey} \n Endpoint: ${endpoint} \n Bucket: ${bucket} \n Git URL: ${gitUrl} \n Project ID: ${projectId}`);
+// console.log(`Access key ID: ${accessKeyId} \n Secret Access Key: ${secretAccessKey} \n Endpoint: ${endpoint} \n Bucket: ${bucket} \n Git URL: ${gitUrl} \n Project ID: ${projectId}, \n Redis Url: ${redisUrl}`);
 
 interface LogPayload {
   log: string;
