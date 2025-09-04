@@ -44,69 +44,80 @@ const s3Client = new S3Client({
 
 
 async function init() {
-  console.log("Executing build-server")
-  publishLog("Build Started...")
+  try {
+    console.log("Executing build-server")
+    publishLog("Build Started...")
 
-  const outDirPath = path.join(__dirname, "output")
-  publishLog("Removing last project from output folder...")
-  execSync(`rm -rf ${outDirPath}`)
+    const outDirPath = path.join(__dirname, "output")
+    publishLog("Removing last project from output folder...")
+    execSync(`rm -rf ${outDirPath}`)
 
-  publishLog("Cloning the project to output directory...")
-  execSync(`git clone ${gitUrl} ${outDirPath}`)
+    publishLog("Cloning the project to output directory...")
+    execSync(`git clone ${gitUrl} ${outDirPath}`)
 
-  // Install and build 
-  publishLog("Installing and build the project...")
-  const process = exec(`cd ${outDirPath} && bun install && bun run build`)
+    // Install and build 
+    publishLog("Installing and build the project...")
+    const process = exec(`cd ${outDirPath} && bun install && bun run build`)
 
-  process.stdout?.on("data", (data: Buffer) => {
-    console.log(data.toString())
-    publishLog(data.toString())
-  })
+    process.stdout?.on("data", (data: Buffer) => {
+      console.log(data.toString())
+      publishLog(data.toString())
+    })
 
-  process.stdout?.on("error", (data: Buffer) => {
-    console.error("Error: ", data.toString())
-    publishLog(`Error: ${data.toString()}`)
-  })
+    process.stdout?.on("error", (data: Buffer) => {
+      console.error("Error: ", data.toString())
+      publishLog(`Error: ${data.toString()}`)
+    })
 
-  process.on("close", async () => {
-    console.log("Build complete")
+    process.on("close", async () => {
+      console.log("Build complete")
 
-    publishLog("Build completed...")
-    const distFolderPath = path.join(__dirname, "output", "dist")
-    const distFolderContents = fs.readdirSync(distFolderPath, { recursive: true })
-    publishLog("Reading the files/directories and their contents...")
+      publishLog("Build completed...")
+      const distFolderPath = path.join(__dirname, "output", "dist")
+      const distFolderContents = fs.readdirSync(distFolderPath, { recursive: true })
+      publishLog("Reading the files/directories and their contents...")
 
-    for (const file of distFolderContents) {
-      const filePath = path.join(distFolderPath, file as string)
-      if (fs.lstatSync(filePath).isDirectory()) {
-        continue;
+      for (const file of distFolderContents) {
+        const filePath = path.join(distFolderPath, file as string)
+        if (fs.lstatSync(filePath).isDirectory()) {
+          continue;
+        }
+
+        const fileSize = fs.statSync(filePath).size
+
+        console.log(`Uploading ${filePath} (${fileSize} bytes)`)
+
+        // Use readFileSync for small files (< 10MB), createReadStream for larger files
+        const fileBody = fileSize < 10 * 1024 * 1024
+          ? fs.readFileSync(filePath)
+          : fs.createReadStream(filePath)
+
+        const command = new PutObjectCommand({
+          Bucket: bucket,
+          Key: `__outputs/${projectId}/${file}`,
+          Body: fileBody,
+          ContentType: mime.lookup(filePath) || undefined
+        })
+
+        publishLog(`Uploading file: ${file}`)
+        await s3Client.send(command)
+
+        console.log("File uploaded:", `__outputs/${projectId}/${file}`)
+        publishLog(`File upload done at __outputs/${projectId}/${file} `)
       }
+      console.log("Upload done")
+      publishLog("Upload done completely!")
 
-      const fileSize = fs.statSync(filePath).size
+      console.log("Build completed successfully");
 
-      console.log(`Uploading ${filePath} (${fileSize} bytes)`)
-
-      // Use readFileSync for small files (< 10MB), createReadStream for larger files
-      const fileBody = fileSize < 10 * 1024 * 1024
-        ? fs.readFileSync(filePath)
-        : fs.createReadStream(filePath)
-
-      const command = new PutObjectCommand({
-        Bucket: bucket,
-        Key: `__outputs/${projectId}/${file}`,
-        Body: fileBody,
-        ContentType: mime.lookup(filePath) || undefined
-      })
-
-      publishLog(`Uploading file: ${file}`)
-      await s3Client.send(command)
-
-      console.log("File uploaded:", `__outputs/${projectId}/${file}`)
-      publishLog(`File upload done at __outputs/${projectId}/${file} `)
-    }
-    console.log("Upload done")
-    publishLog("Upload done completely!")
-  })
+      // Graceful shutdown
+      console.log("Shutting down gracefully...");
+      setTimeout(() => global.process.exit(0), 1000);
+    })
+  } catch (error) {
+    console.error("Build failed:", error);
+    setTimeout(() => process.exit(1), 1000);
+  }
 }
 
 init()
