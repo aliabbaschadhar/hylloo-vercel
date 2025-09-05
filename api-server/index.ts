@@ -2,10 +2,9 @@ import "dotenv/config"
 import express from "express"
 import { generateSlug } from "random-word-slugs"
 import * as k8s from "@kubernetes/client-node"
-import { Server } from "socket.io"
 import http from 'http'
 import { PrismaClient } from "@prisma/client"
-import { string, z } from "zod"
+import { z } from "zod"
 import { StatusCodes } from "http-status-codes"
 import { createClient } from "@clickhouse/client"
 import { Kafka } from "kafkajs"
@@ -23,13 +22,6 @@ if (!kafkaBrokerUrl || !kafkaPassword) {
   throw new Error("ENVIRONMENT VARIABLES ARE NOT AVAILABLE!")
 }
 
-const server = http.createServer(app);
-const SOCKET_PORT = 9001;
-const io = new Server(server, {
-  cors: {
-    origin: "*"
-  }
-});
 const prisma = new PrismaClient();
 const clickhouseClient = createClient({
   url: process.env.CLICKHOUSE_HOST, // Changed from 'host' to 'url'
@@ -58,16 +50,6 @@ const kafka = new Kafka({
 const consumer = kafka.consumer({ groupId: "api-server-logs-consumer" })
 
 app.use(express.json())
-
-
-io.on("connection", (socket) => {
-  socket.on("subscribe", (channel) => {
-    io.to(channel).emit("message", `New socket with id ${socket.id} joined`)
-    socket.join(channel)
-    socket.emit("message", `Joined ${channel}`)
-  })
-})
-
 
 async function initKafkaConsumer() {
   await consumer.connect()
@@ -302,10 +284,6 @@ app.get("/logs/:id", async (req, res) => {
     return res.status(500).json({ error: "Failed to fetch logs" });
   }
 });
-
-server.listen(SOCKET_PORT, () => {
-  console.log(`Socket server: ${SOCKET_PORT}`)
-})
 
 app.listen(PORT, () => {
   console.log(`Api server listening on: ${PORT}`)
