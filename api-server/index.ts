@@ -5,7 +5,7 @@ import * as k8s from "@kubernetes/client-node"
 import { Server } from "socket.io"
 import http from 'http'
 import { PrismaClient } from "@prisma/client"
-import { z } from "zod"
+import { string, z } from "zod"
 import { StatusCodes } from "http-status-codes"
 import { createClient } from "@clickhouse/client"
 import { Kafka } from "kafkajs"
@@ -16,10 +16,10 @@ import { v4 as uuidv4 } from "uuid"
 
 const app = express();
 const PORT = 9000;
-const brokerUrl = process.env.KAFKA_BROKER_URL
-const kafkaPassword = process.env.KAFKA_PASSWORD
+const kafkaBrokerUrl = process.env.KAFKA_BROKER_URL
+const kafkaPassword = process.env.KAFKA_SASL_PASSWORD
 
-if (!brokerUrl || !kafkaPassword) {
+if (!kafkaBrokerUrl || !kafkaPassword) {
   throw new Error("ENVIRONMENT VARIABLES ARE NOT AVAILABLE!")
 }
 
@@ -32,14 +32,14 @@ const io = new Server(server, {
 });
 const prisma = new PrismaClient();
 const clickhouseClient = createClient({
-  host: process.env.CLICKHOUSE_HOST,
+  url: process.env.CLICKHOUSE_HOST, // Changed from 'host' to 'url'
   database: "default",
-  username: process.env.CLICKHOUSE_USERNAME,
+  username: "avnadmin",
   password: process.env.CLICKHOUSE_PASSWORD,
 })
 const kafka = new Kafka({
   clientId: `api-server`,
-  brokers: [brokerUrl],
+  brokers: [kafkaBrokerUrl],
   ssl: {
     ca: [fs.readFileSync(path.join(__dirname, 'kafka(ca).pem'), "utf-8")]
   },
@@ -47,7 +47,13 @@ const kafka = new Kafka({
     username: "avnadmin",
     password: kafkaPassword,
     mechanism: "plain"
-  }
+  },
+  retry: {
+    retries: 5, // Retry up to 5 times
+    initialRetryTime: 300, // Start with 300ms retry delay
+    maxRetryTime: 30000 // Maximum retry delay of 30 seconds
+  },
+  requestTimeout: 30000 // Set a 30-second timeout for requests
 })
 const consumer = kafka.consumer({ groupId: "api-server-logs-consumer" })
 
@@ -72,36 +78,33 @@ async function initKafkaConsumer() {
     .catch(err => console.error("Unable to subscribe to topics: ", err))
 
   await consumer.run({
-
     autoCommit: false,
     eachBatch: async function ({ batch, heartbeat, commitOffsetsIfNecessary, resolveOffset }) {
-
       const messages = batch.messages;
       console.log(`Received ${messages.length} messages...`)
 
       for (const message of messages) {
-
-        const stringMessage = message.value?.toString() // Because it was a buffer
+        const stringMessage = message.value?.toString()
         if (!stringMessage) {
-          console.warn(`Message doesn't exits`)
+          console.warn(`Message doesn't exist`)
           continue;
         }
 
-        const { PROJECT_ID, DEPLOYMENT_ID, log } = JSON.parse(stringMessage)
+        // Fix the destructuring to match the actual message structure
+        const { projectId, deploymentId, log } = JSON.parse(stringMessage)
 
         // Add to events to click house DB
         const { query_id } = await clickhouseClient.insert({
           table: 'log_events',
-          values: [{ event_id: uuidv4(), deployment_id: DEPLOYMENT_ID, log: log }],
+          values: [{ event_id: uuidv4(), deployment_id: deploymentId, log: log }],
           format: "JSONEachRow"
         })
-
-        console.log(query_id)
+        console.log(JSON.parse(stringMessage))
+        // console.log(query_id)
 
         resolveOffset(message.offset)
         await commitOffsetsIfNecessary()
         await heartbeat()
-
       }
     }
   })
@@ -160,13 +163,11 @@ app.post("/deploy", async (req, res) => {
       return res.status(StatusCodes.NOT_FOUND).json({ error: "Project doesn't exists!" })
     }
 
-    // Check if there is no running deployment then we shall create one
-
     let deployment;
     try {
       deployment = await prisma.deployment.create({
         data: {
-          project: { connect: { id: projectId } }, // Connect this project to this deployment
+          project: { connect: { id: projectId } },
           status: "QUEUED"
         }
       });
@@ -175,7 +176,6 @@ app.post("/deploy", async (req, res) => {
       return res.status(500).json({ error: "Failed to create deployment" });
     }
 
-    // Kubernetes client setup with SSL verification disabled
     const kc = new k8s.KubeConfig()
     kc.loadFromDefault()
 
@@ -185,13 +185,14 @@ app.post("/deploy", async (req, res) => {
 
     const k8sApi = kc.makeApiClient(k8s.CoreV1Api)
 
-    // Pod manifest with env vars 
+    // Fix the pod name consistency
+    const podName = `build-server-img-${deployment.id}`
     const podManifest = {
-      metadata: { name: `build-server-img` },
+      metadata: { name: podName }, // Use the same variable
       spec: {
         containers: [{
           name: "build-server",
-          image: "aliabbaschadhar003/build-server:v1.6.2",
+          image: "aliabbaschadhar003/build-server:v2",
           env: [
             { name: "GIT_REPOSITORY_URL", value: project.gitURL },
             { name: "PROJECT_ID", value: projectId },
@@ -200,8 +201,8 @@ app.post("/deploy", async (req, res) => {
             { name: "S3_SECRET_ACCESS_KEY", value: process.env.S3_SECRET_ACCESS_KEY },
             { name: "S3_ENDPOINT", value: process.env.S3_ENDPOINT },
             { name: "BUCKET", value: process.env.BUCKET },
-            { name: "KAFKA_BROKER_URL", value: process.env.KAFKA_BROKER_URL },
-            { name: "KAFKA_SASL_PASSWORD", value: process.env.KAFKA_SASL_PASSWORD }
+            { name: "KAFKA_BROKER_URL", value: kafkaBrokerUrl },
+            { name: "KAFKA_SASL_PASSWORD", value: kafkaPassword }
           ]
         }],
         restartPolicy: "Never"
@@ -216,18 +217,17 @@ app.post("/deploy", async (req, res) => {
     console.log("Pod created successfully")
 
     // Send immediate response
-    res.json({ slug: `${projectId}`, status: "build started", url: `http://${projectId}.localhost:8000` })
+    res.json({ status: "QUEUED", data: { deploymentId: deployment.id } })
 
-    // Poll pod status in background
-    const podName = `build-sever-img`
+    // Poll pod status in background - use the same podName variable
     let completed = false
     let attempts = 0
-    const maxAttempts = 120 // 10 minutes max (120 * 5 seconds)
+    const maxAttempts = 120
 
     while (!completed && attempts < maxAttempts) {
       try {
         const podResponse = await k8sApi.readNamespacedPod({
-          name: podName,
+          name: podName, // Now using the correct variable
           namespace: "default"
         })
         const phase = podResponse.status?.phase
@@ -235,7 +235,6 @@ app.post("/deploy", async (req, res) => {
 
         console.log(`Pod ${podName} status: ${phase}`)
 
-        // Check if container has terminated (regardless of pod phase)
         const buildContainer = containerStatuses?.find(c => c.name === "build-server")
         const isTerminated = buildContainer?.state?.terminated
 
@@ -279,11 +278,10 @@ app.post("/deploy", async (req, res) => {
     }
 
   } catch (error) {
-    console.error("Error in /project endpoint:", error)
+    console.error("Error in /deploy endpoint:", error)
     res.status(500).json({ error: "Internal server error" })
   }
 })
-
 
 
 server.listen(SOCKET_PORT, () => {
