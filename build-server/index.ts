@@ -4,7 +4,7 @@ import { exec, execSync } from "child_process"
 import fs from "fs"
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
 import * as mime from "mime-types" // To check the type of file.
-import Redis from "ioredis"
+import { Kafka } from "kafkajs"
 
 
 const accessKeyId = process.env.S3_ACCESS_KEY_ID;
@@ -12,25 +12,38 @@ const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
 const endpoint = process.env.S3_ENDPOINT;
 const bucket = process.env.BUCKET;
 const gitUrl = process.env.GIT_REPOSITORY_URL;
-const projectId = process.env.PROJECT_SLUG
-const redisUrl = process.env.REDIS_URL
+const projectId = process.env.PROJECT_ID
+const deploymentId = process.env.DEPLOYMENT_ID
+const brokerUrl = process.env.KAFKA_BROKER_URL
+const kafkaPassword = process.env.KAFKA_SASL_PASSWORD
 
 
-if (!accessKeyId || !secretAccessKey || !endpoint || !projectId || !bucket || !gitUrl || !redisUrl) {
+if (!accessKeyId || !secretAccessKey || !endpoint || !projectId || !bucket || !gitUrl || !deploymentId || !brokerUrl || !kafkaPassword) {
   throw new Error("Missing credentials in environment variables.");
 }
 
-const publisher = new Redis(redisUrl)
-publisher.on("error", (err) => {
-  console.error("Redis connection error:", err)
+
+// console.log(`Access key ID: ${accessKeyId} \n Secret Access Key: ${secretAccessKey} \n Endpoint: ${endpoint} \n Bucket: ${bucket} \n Git URL: ${gitUrl} \n Project ID: ${projectId}, \n Redis Url: ${redisUrl}
+// \n Deployment ID: ${deploymentId}`);
+
+const kafka = new Kafka({
+  clientId: `docker-build-sever-${deploymentId}`,
+  brokers: [brokerUrl],
+  ssl: {
+    ca: [fs.readFileSync(path.join(__dirname, 'kafka(ca).pem'), "utf-8")]
+  },
+  sasl: {
+    username: "avnadmin",
+    password: kafkaPassword,
+    mechanism: "plain"
+  }
 })
 
-// console.log(`Access key ID: ${accessKeyId} \n Secret Access Key: ${secretAccessKey} \n Endpoint: ${endpoint} \n Bucket: ${bucket} \n Git URL: ${gitUrl} \n Project ID: ${projectId}, \n Redis Url: ${redisUrl}`);
 
+const producer = kafka.producer()
 
-
-function publishLog(log: string) {
-  publisher.publish(`logs:${projectId}`, JSON.stringify({ log }));
+async function publishLog(log: string) {
+  await producer.send({ topic: `container-logs`, messages: [{ key: "log", value: JSON.stringify({ projectId, deploymentId, log }) }] })
 }
 
 const s3Client = new S3Client({
@@ -45,37 +58,43 @@ const s3Client = new S3Client({
 
 async function init() {
   try {
+    await producer.connect()
+      .catch(err => console.error("Error while connecting: ", err))
+
     console.log("Executing build-server")
-    publishLog("Build Started...")
+    await publishLog("Build Started...")
 
     const outDirPath = path.join(__dirname, "output")
-    publishLog("Removing last project from output folder...")
+    await publishLog("Removing last project from output folder...")
+
     execSync(`rm -rf ${outDirPath}`)
 
-    publishLog("Cloning the project to output directory...")
+    await publishLog("Cloning the project to output directory...")
+
     execSync(`git clone ${gitUrl} ${outDirPath}`)
 
     // Install and build 
-    publishLog("Installing and build the project...")
+    await publishLog("Installing and build the project...")
+
     const process = exec(`cd ${outDirPath} && bun install && bun run build`)
 
-    process.stdout?.on("data", (data: Buffer) => {
+    process.stdout?.on("data", async (data: Buffer) => {
       console.log(data.toString())
-      publishLog(data.toString())
+      await publishLog(data.toString())
     })
 
-    process.stdout?.on("error", (data: Buffer) => {
+    process.stdout?.on("error", async (data: Buffer) => {
       console.error("Error: ", data.toString())
-      publishLog(`Error: ${data.toString()}`)
+      await publishLog(`Error: ${data.toString()}`)
     })
 
     process.on("close", async () => {
       console.log("Build complete")
 
-      publishLog("Build completed...")
+      await publishLog("Build completed...")
       const distFolderPath = path.join(__dirname, "output", "dist")
       const distFolderContents = fs.readdirSync(distFolderPath, { recursive: true })
-      publishLog("Reading the files/directories and their contents...")
+      await publishLog("Reading the files/directories and their contents...")
 
       for (const file of distFolderContents) {
         const filePath = path.join(distFolderPath, file as string)
@@ -99,14 +118,14 @@ async function init() {
           ContentType: mime.lookup(filePath) || undefined
         })
 
-        publishLog(`Uploading file: ${file}`)
+        await publishLog(`Uploading file: ${file}`)
         await s3Client.send(command)
 
         console.log("File uploaded:", `__outputs/${projectId}/${file}`)
-        publishLog(`File upload done at __outputs/${projectId}/${file} `)
+        await publishLog(`File upload done at __outputs/${projectId}/${file} `)
       }
       console.log("Upload done")
-      publishLog("Upload done completely!")
+      await publishLog("Upload done completely!")
 
       console.log("Build completed successfully");
 
