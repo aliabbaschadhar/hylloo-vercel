@@ -3,16 +3,25 @@ import express from "express"
 import { generateSlug } from "random-word-slugs"
 import * as k8s from "@kubernetes/client-node"
 import { Server } from "socket.io"
-import Redis from "ioredis"
 import http from 'http'
 import { PrismaClient } from "@prisma/client"
 import { z } from "zod"
-import { StatusCodes, ReasonPhrases } from "http-status-codes"
+import { StatusCodes } from "http-status-codes"
+import { createClient } from "@clickhouse/client"
+import { Kafka } from "kafkajs"
+import fs from "fs"
+import path from "path"
+import { v4 as uuidv4 } from "uuid"
 
 
 const app = express();
 const PORT = 9000;
-const redisUrl = process.env.REDIS_URL
+const brokerUrl = process.env.KAFKA_BROKER_URL
+const kafkaPassword = process.env.KAFKA_PASSWORD
+
+if (!brokerUrl || !kafkaPassword) {
+  throw new Error("ENVIRONMENT VARIABLES ARE NOT AVAILABLE!")
+}
 
 const server = http.createServer(app);
 const SOCKET_PORT = 9001;
@@ -22,12 +31,25 @@ const io = new Server(server, {
   }
 });
 const prisma = new PrismaClient();
-
-
-if (!redisUrl) throw new Error("Redis url is not available")
-
-const subscriber = new Redis(redisUrl)
-
+const clickhouseClient = createClient({
+  host: process.env.CLICKHOUSE_HOST,
+  database: "default",
+  username: process.env.CLICKHOUSE_USERNAME,
+  password: process.env.CLICKHOUSE_PASSWORD,
+})
+const kafka = new Kafka({
+  clientId: `api-server`,
+  brokers: [brokerUrl],
+  ssl: {
+    ca: [fs.readFileSync(path.join(__dirname, 'kafka(ca).pem'), "utf-8")]
+  },
+  sasl: {
+    username: "avnadmin",
+    password: kafkaPassword,
+    mechanism: "plain"
+  }
+})
+const consumer = kafka.consumer({ groupId: "api-server-logs-consumer" })
 
 app.use(express.json())
 
@@ -41,16 +63,52 @@ io.on("connection", (socket) => {
 })
 
 
-async function initRedisSubscribe() {
-  console.log("Subscribed to logs...")
-  await subscriber.psubscribe("logs:*") // Subscribe to all messages which comes on logs:
-  subscriber.on("pmessage", (pattern, channel, message) => {
-    // In psubscribe or pmessage => p stands for pattern 
-    io.to(channel).emit("message", message)
+async function initKafkaConsumer() {
+  await consumer.connect()
+    .catch(
+      (err) => console.error('Error happened while connecting consumer : ', err)
+    )
+  await consumer.subscribe({ topics: ['container-logs'] })
+    .catch(err => console.error("Unable to subscribe to topics: ", err))
+
+  await consumer.run({
+
+    autoCommit: false,
+    eachBatch: async function ({ batch, heartbeat, commitOffsetsIfNecessary, resolveOffset }) {
+
+      const messages = batch.messages;
+      console.log(`Received ${messages.length} messages...`)
+
+      for (const message of messages) {
+
+        const stringMessage = message.value?.toString() // Because it was a buffer
+        if (!stringMessage) {
+          console.warn(`Message doesn't exits`)
+          continue;
+        }
+
+        const { PROJECT_ID, DEPLOYMENT_ID, log } = JSON.parse(stringMessage)
+
+        // Add to events to click house DB
+        const { query_id } = await clickhouseClient.insert({
+          table: 'log_events',
+          values: [{ event_id: uuidv4(), deployment_id: DEPLOYMENT_ID, log: log }],
+          format: "JSONEachRow"
+        })
+
+        console.log(query_id)
+
+        resolveOffset(message.offset)
+        await commitOffsetsIfNecessary()
+        await heartbeat()
+
+      }
+    }
   })
 }
 
-initRedisSubscribe()
+initKafkaConsumer()
+
 
 app.get("/health", (req, res) => {
   res.status(200).json({
@@ -94,14 +152,28 @@ app.post("/project", async (req, res) => {
 
 app.post("/deploy", async (req, res) => {
   try {
-    const { gitUrl } = req.body
+    const { projectId } = req.body
 
-    if (!gitUrl) {
-      return res.status(400).json({ error: "gitUrl is required" })
+    const project = await prisma.project.findUnique({ where: { id: projectId } })
+
+    if (!project) {
+      return res.status(StatusCodes.NOT_FOUND).json({ error: "Project doesn't exists!" })
     }
 
-    const projectSlug = generateSlug()
-    console.log(projectSlug)
+    // Check if there is no running deployment then we shall create one
+
+    let deployment;
+    try {
+      deployment = await prisma.deployment.create({
+        data: {
+          project: { connect: { id: projectId } }, // Connect this project to this deployment
+          status: "QUEUED"
+        }
+      });
+    } catch (error) {
+      console.error("Error creating deployment:", error);
+      return res.status(500).json({ error: "Failed to create deployment" });
+    }
 
     // Kubernetes client setup with SSL verification disabled
     const kc = new k8s.KubeConfig()
@@ -115,19 +187,21 @@ app.post("/deploy", async (req, res) => {
 
     // Pod manifest with env vars 
     const podManifest = {
-      metadata: { name: `build-${projectSlug}` },
+      metadata: { name: `build-server-img` },
       spec: {
         containers: [{
           name: "build-server",
           image: "aliabbaschadhar003/build-server:v1.6.2",
           env: [
-            { name: "GIT_REPOSITORY_URL", value: gitUrl },
-            { name: "PROJECT_SLUG", value: projectSlug },
+            { name: "GIT_REPOSITORY_URL", value: project.gitURL },
+            { name: "PROJECT_ID", value: projectId },
+            { name: "DEPLOYMENT_ID", value: deployment.id },
             { name: "S3_ACCESS_KEY_ID", value: process.env.S3_ACCESS_KEY_ID },
             { name: "S3_SECRET_ACCESS_KEY", value: process.env.S3_SECRET_ACCESS_KEY },
             { name: "S3_ENDPOINT", value: process.env.S3_ENDPOINT },
             { name: "BUCKET", value: process.env.BUCKET },
-            { name: "REDIS_URL", value: process.env.REDIS_URL }
+            { name: "KAFKA_BROKER_URL", value: process.env.KAFKA_BROKER_URL },
+            { name: "KAFKA_SASL_PASSWORD", value: process.env.KAFKA_SASL_PASSWORD }
           ]
         }],
         restartPolicy: "Never"
@@ -142,10 +216,10 @@ app.post("/deploy", async (req, res) => {
     console.log("Pod created successfully")
 
     // Send immediate response
-    res.json({ slug: `${projectSlug}`, status: "build started", url: `http://${projectSlug}.localhost:8000` })
+    res.json({ slug: `${projectId}`, status: "build started", url: `http://${projectId}.localhost:8000` })
 
     // Poll pod status in background
-    const podName = `build-${projectSlug}`
+    const podName = `build-sever-img`
     let completed = false
     let attempts = 0
     const maxAttempts = 120 // 10 minutes max (120 * 5 seconds)
