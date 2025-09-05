@@ -11,6 +11,8 @@ const proxy = httpProxy.createProxyServer()
 app.use((req, res) => {
   const host = req.hostname;
   const projectId = host.split(".")[0];
+  //TODO: Find the specific project based on subdomain given by user 
+  // TODO: And then use that project id
 
   // If the request is for root, rewrite to /index.html
   if (req.path === "/") {
